@@ -83,10 +83,21 @@ jobs:
           CONFIG_PACKAGE_luci-proto-amneziawg=y
           CONFIG
           make defconfig
-          grep -Fx 'CONFIG_TARGET_DEVICE_ramips_mt7621_DEVICE_cudy_wr1300-v4=y' .config
-          grep -Fx 'CONFIG_PACKAGE_kmod-amneziawg=y' .config
-          grep -Fx 'CONFIG_PACKAGE_amneziawg-tools=y' .config
-          grep -Fx 'CONFIG_PACKAGE_luci-proto-amneziawg=y' .config
+          echo '=== Effective device configuration ==='
+          grep -E '^CONFIG_TARGET|^# CONFIG_TARGET|^CONFIG_PACKAGE_(kmod-amneziawg|amneziawg-tools|luci-proto-amneziawg|luci)=' .config | grep -E '(ramips|mt7621|cudy|amneziawg|luci)' || true
+          echo '=== Target definition ==='
+          grep -A 24 -B 5 'Device/cudy_wr1300-v4' target/linux/ramips/image/mt7621.mk || true
+          echo '=== Verify selected build packages and target ==='
+          for option in \
+            CONFIG_TARGET_DEVICE_ramips_mt7621_DEVICE_cudy_wr1300-v4=y \
+            CONFIG_PACKAGE_kmod-amneziawg=y \
+            CONFIG_PACKAGE_amneziawg-tools=y \
+            CONFIG_PACKAGE_luci-proto-amneziawg=y; do
+              if ! grep -Fxq "$option" .config; then
+                echo "::error::Missing required option: $option"
+                exit 1
+              fi
+          done
 
       - name: Download source archives
         working-directory: openwrt
