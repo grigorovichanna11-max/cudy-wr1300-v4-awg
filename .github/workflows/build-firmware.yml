@@ -77,19 +77,36 @@ jobs:
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt7621=y
           CONFIG_TARGET_ramips_mt7621_DEVICE_cudy_wr1300-v4=y
+          # CONFIG_PACKAGE_dnsmasq is not set
+          CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_dnsmasq_full_nftset=y
+          CONFIG_PACKAGE_dnsmasq_full_conntrack=y
+          CONFIG_PACKAGE_kmod-nf-conntrack-netlink=y
+          CONFIG_PACKAGE_libnetfilter-conntrack=y
+          CONFIG_PACKAGE_nftables-json=y
           CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_pbr=y
+          CONFIG_PACKAGE_luci-app-pbr=y
           CONFIG_PACKAGE_kmod-amneziawg=y
           CONFIG_PACKAGE_amneziawg-tools=y
           CONFIG_PACKAGE_luci-proto-amneziawg=y
           CONFIG
           make defconfig
           echo '=== Effective device configuration ==='
-          grep -E '^CONFIG_TARGET_(ramips|SUBTARGET|BOARD)|^CONFIG_PACKAGE_(kmod-amneziawg|amneziawg-tools|luci-proto-amneziawg|luci)=' .config | grep -E '(ramips|mt7621|cudy|amneziawg|luci)' || true
+          grep -E '^CONFIG_TARGET_(ramips|SUBTARGET|BOARD)|^CONFIG_PACKAGE_(dnsmasq|kmod-nf-conntrack-netlink|libnetfilter-conntrack|nftables-json|pbr|luci-app-pbr|kmod-amneziawg|amneziawg-tools|luci-proto-amneziawg|luci)' .config || true
           echo '=== Target definition ==='
           grep -A 24 -B 5 'Device/cudy_wr1300-v4' target/linux/ramips/image/mt7621.mk || true
           echo '=== Verify selected build packages and target ==='
           for option in \
             CONFIG_TARGET_ramips_mt7621_DEVICE_cudy_wr1300-v4=y \
+            CONFIG_PACKAGE_dnsmasq-full=y \
+            CONFIG_PACKAGE_dnsmasq_full_nftset=y \
+            CONFIG_PACKAGE_dnsmasq_full_conntrack=y \
+            CONFIG_PACKAGE_kmod-nf-conntrack-netlink=y \
+            CONFIG_PACKAGE_libnetfilter-conntrack=y \
+            CONFIG_PACKAGE_nftables-json=y \
+            CONFIG_PACKAGE_pbr=y \
+            CONFIG_PACKAGE_luci-app-pbr=y \
             CONFIG_PACKAGE_kmod-amneziawg=y \
             CONFIG_PACKAGE_amneziawg-tools=y \
             CONFIG_PACKAGE_luci-proto-amneziawg=y; do
@@ -98,6 +115,10 @@ jobs:
                 exit 1
               fi
           done
+          if grep -Fxq 'CONFIG_PACKAGE_dnsmasq=y' .config; then
+            echo '::error::Minimal dnsmasq must not be installed alongside dnsmasq-full'
+            exit 1
+          fi
 
       - name: Download source archives
         working-directory: openwrt
@@ -106,6 +127,43 @@ jobs:
       - name: Compile firmware
         working-directory: openwrt
         run: make -j2 V=s
+
+      - name: Verify kernel module and package artifacts
+        shell: bash
+        working-directory: openwrt
+        run: |
+          set -euo pipefail
+          mapfile -t vermagic_files < <(find build_dir -type f \
+            -path '*/linux-ramips_mt7621/linux-*/.vermagic' | sort)
+          if [ "${#vermagic_files[@]}" -ne 1 ]; then
+            echo "::error::Expected one kernel .vermagic file, found ${#vermagic_files[@]}"
+            exit 1
+          fi
+          kernel_vermagic="$(cat "${vermagic_files[0]}")"
+          if [[ ! "$kernel_vermagic" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error::Invalid kernel vermagic: $kernel_vermagic"
+            exit 1
+          fi
+          printf '%s\n' "$kernel_vermagic" > "$GITHUB_WORKSPACE/kernel-vermagic.txt"
+
+          mapfile -t modules < <(find build_dir -type f \
+            -path '*/linux-ramips_mt7621/linux-*/net/netfilter/nf_conntrack_netlink.ko' | sort)
+          if [ "${#modules[@]}" -ne 1 ]; then
+            echo "::error::Expected nf_conntrack_netlink.ko, found ${#modules[@]}"
+            exit 1
+          fi
+
+          mapfile -t kernel_packages < <(find bin/targets/ramips/mt7621 -type f \
+            -name 'kernel-*.apk' | sort)
+          mapfile -t kmod_packages < <(find bin/targets/ramips/mt7621 -type f \
+            -name 'kmod-nf-conntrack-netlink-*.apk' | sort)
+          if [ "${#kernel_packages[@]}" -ne 1 ] || [ "${#kmod_packages[@]}" -ne 1 ]; then
+            echo '::error::Matching kernel and kmod APK files were not produced'
+            exit 1
+          fi
+          printf 'Kernel vermagic: %s\nKernel package: %s\nKmod package: %s\nModule: %s\n' \
+            "$kernel_vermagic" "${kernel_packages[0]}" \
+            "${kmod_packages[0]}" "${modules[0]}"
 
       - name: Package exact sysupgrade image and build information
         shell: bash
@@ -119,16 +177,24 @@ jobs:
             exit 1
           fi
           cp "${images[0]}" output/
+          cp openwrt/.config output/config.buildinfo
           cd output
           sha256sum *.bin > SHA256SUMS
-          printf 'OpenWrt: v25.12.4\nBoard: cudy,wr1300-v4\nAWG source: 2Grey/awg-openwrt\nAWG revision: %s\n' \
-            "$(cat ../openwrt/awg-source-commit.txt)" > BUILD-INFO.txt
+          {
+            printf 'OpenWrt: v25.12.4\nBoard: cudy,wr1300-v4\n'
+            printf 'OpenWrt revision: %s\n' "$(git -C ../openwrt rev-parse HEAD)"
+            printf 'AWG source: 2Grey/awg-openwrt\nAWG revision: %s\n' \
+              "$(cat ../openwrt/awg-source-commit.txt)"
+            printf 'Kernel vermagic: %s\n' "$(cat ../kernel-vermagic.txt)"
+            printf 'Included: dnsmasq-full (nftset + conntrack), kmod-nf-conntrack-netlink, pbr, luci-app-pbr\n'
+            printf 'Included: AmneziaWG kernel module, tools and LuCI protocol\n'
+          } > BUILD-INFO.txt
           ls -lh
 
       - name: Upload sysupgrade and checksums
         uses: actions/upload-artifact@v4
         with:
-          name: cudy-wr1300-v4-openwrt25.12.4-awg3.1
+          name: cudy-wr1300-v4-openwrt25.12.4-awg3.1-dnsmasq-full
           path: output/*
           if-no-files-found: error
           retention-days: 14
